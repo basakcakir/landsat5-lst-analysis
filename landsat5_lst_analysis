@@ -1,0 +1,104 @@
+// ADD LANDSAT IMAGE
+var imageCollection = ee.ImageCollection('LANDSAT/LT05/C02/T1')
+  .filterDate('2004-01-01', '2004-07-31')
+  .filterBounds(table)  // Define geometry according to your study area
+  .filter(ee.Filter.lt('CLOUD_COVER', 10));
+print(imageCollection);
+
+// If we want to use mean
+var clippedImage = imageCollection.mean().clip(table);
+
+// Conversion from DN to Radiance (Landsat 5 Band 6)
+var radiance = clippedImage.expression(
+  '(15.303 - 1.238) / (255 - 1) * (B6 - 1) + 1.238', {
+    'B6': clippedImage.select('B6')
+}).rename('Radiance');
+
+// Calculate Brightness Temperature (BT) in Celsius
+var bT = radiance.expression(
+  '(1260.56 / log(607.76 / radiance + 1)) - 273.15', {
+    'radiance': radiance
+}).rename('BT');
+print(bT);
+
+// Calculate NDVI
+var band5 = clippedImage.select('B5');  // NIR band
+var band4 = clippedImage.select('B4');  // Red band
+var ndvi = clippedImage.expression(
+  '(B5 - B4) / (B5 + B4)', {
+    'B5': band5,
+    'B4': band4
+}).rename('NDVI');
+
+// Calculate NDVI min and max values
+var min = ee.Number(ndvi.reduceRegion({
+  reducer: ee.Reducer.min(),
+  geometry: table,
+  scale: 30,
+  maxPixels: 1e10
+}).values().get(0));
+
+var max = ee.Number(ndvi.reduceRegion({
+  reducer: ee.Reducer.max(),
+  geometry: table,
+  scale: 30,
+  maxPixels: 1e10
+}).values().get(0));
+
+print(min);
+print(max);
+
+// Calculate PV (Proportion of Vegetation)
+var pv = (ndvi.subtract(min).divide(max.subtract(min))).pow(2);
+
+// Calculate Emissivity (EMM)
+var a = ee.Number(0.004);
+var b = ee.Number(0.986);
+var em = pv.multiply(a).add(b).rename('EMM');
+
+// Calculate Land Surface Temperature (LST)
+var LST = bT.expression(
+  '(BT / (1 + (0.00115 * BT / 1.4388) * log(e)))', {
+    'BT': bT.select('BT'),
+    'e': em.select('EMM')
+  }).rename('LST');
+
+// Color palette for visualization
+var vis = {
+  palette: [
+    '040274','040281','0502a3','0502b8','0502ce','0502e6',
+    '0602ff','235cb1','307ef3','269db1','30c8e2','32d3ef',
+    '3be285','3ff38f','86e26f','3ae237','b5e22e','d6e21f',
+    'fff705','ffd611','ffb613','ff8b13','ff6e08','ff500d',
+    'ff0000','de0101','c21301','a71001','911003'
+  ]
+};
+
+Map.addLayer(LST, vis, "LST Landsat 5");
+
+// Calculate Mean LST
+var meanLST = LST.reduceRegion({
+  reducer: ee.Reducer.mean(),
+  geometry: table,
+  scale: 30,
+  maxPixels: 1e10
+}).get('LST');
+
+// Print Mean LST to Console
+print('Mean LST:', meanLST);
+
+// Export LST Image to Google Drive
+Export.image.toDrive({
+  image: LST,
+  description: 'LST Landsat 5',
+  scale: 30,
+  region: table
+});
+
+// Add Landsat 5 image in True Color
+var trueColor = {
+  bands: ['B4', 'B3', 'B2'],
+  min: 0,
+  max: 0.3
+};
+Map.addLayer(clippedImage, trueColor, 'Landsat 5 True Color');
